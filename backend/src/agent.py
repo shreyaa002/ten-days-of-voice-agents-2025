@@ -1,10 +1,12 @@
+# backend/src/agent.py
 import logging
 import json
 import os
 import time
-
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from typing import List, Optional
 
 from livekit.agents import (
     Agent,
@@ -24,78 +26,101 @@ from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("agent")
+logger.setLevel(logging.INFO)
 
 load_dotenv(".env.local")
 
+# File where check-ins are stored
+LOG_PATH = "wellness_log.json"
 
-class Assistant(Agent):
+
+class WellnessAgent(Agent):
     def _init_(self) -> None:
+        # System prompt: grounded, supportive, short, and safe
         super()._init_(
             instructions="""
-You are a friendly coffee shop barista for Blue Tokai Coffee.
+You are a grounded, supportive health & wellness companion. You are empathetic, concise,
+non-judgmental, and explicitly not a clinician. You will ask short daily check-in questions
+and help the user set 1-3 small, realistic intentions for the day.
 
-The user is talking to you via voice.
-
-Your main job:
-- Help the user place a coffee order.
-- Ask clear follow-up questions until you know ALL of these fields:
-  - drinkType (e.g. latte, cappuccino, cold brew, americano)
-  - size (small, medium, large)
-  - milk (e.g. whole, skim, soy, oat, almond)
-  - extras (list of extras, e.g. whipped cream, caramel, extra shot)
-  - name (customer’s first name)
-
-Behavior rules:
-- Always assume the user is ordering a drink, unless they clearly say otherwise.
-- Ask one or two simple questions at a time.
-- If any field is missing or unclear, politely ask again or offer common options.
-- Confirm the full order briefly before finalizing it.
-- When you know all 5 fields and are confident, call the save_order tool exactly once
-  with the completed order.
-- After the tool returns, briefly read back the order to the customer and ask if they need anything else.
-
-Speak naturally, like a real barista in a coffee shop. Keep responses short and conversational.
-Do not use emojis or special symbols.
+Behavior:
+- Ask about mood and energy: e.g., "How are you feeling today?" "What's your energy like?"
+- Ask for 1-3 intentions/objectives for the day and any small self-care plan.
+- Offer short, actionable suggestions (e.g., break large tasks into small steps, take a 5-minute walk, short breathing break).
+- Avoid medical or diagnostic wording.
+- Confirm back: repeat the mood summary and the main objectives and ask "Does this sound right?"
+- When you have mood, energy, and objectives, call the tool save_checkin(mood, energy, objectives) exactly once.
+- If historical data is available, briefly reference the most recent previous check-in early in the conversation (e.g., "Last time you mentioned low energy; how is today compared to that?").
             """,
         )
 
 
-class Order(BaseModel):
-    drinkType: str
-    size: str
-    milk: str
-    extras: list[str]
-    name: str
+class Checkin(BaseModel):
+    timestamp: str
+    mood: str
+    energy: str
+    objectives: List[str]
+    agent_summary: Optional[str] = None
+
+
+def _ensure_log():
+    # Create file if missing with empty list
+    if not os.path.exists(LOG_PATH):
+        with open(LOG_PATH, "w", encoding="utf-8") as f:
+            json.dump([], f)
+
+
+def load_all_checkins() -> List[dict]:
+    _ensure_log()
+    with open(LOG_PATH, "r", encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except Exception:
+            return []
+
+
+def latest_checkin() -> Optional[dict]:
+    entries = load_all_checkins()
+    if not entries:
+        return None
+    # assume append order, return last
+    return entries[-1]
 
 
 @function_tool
-async def save_order(ctx: RunContext, order: Order) -> str:
+async def save_checkin(ctx: RunContext, mood: str, energy: str, objectives: List[str]) -> str:
     """
-    Save a completed coffee order to a JSON file and return a human-friendly summary.
+    Save a wellness check-in to wellness_log.json and return a short agent summary.
+    Called by the LLM when the check-in is complete.
     """
+    _ensure_log()
+    now = datetime.now(timezone.utc).isoformat()
+    # Clean objectives and create summary
+    obj_list = [o.strip() for o in objectives if o and o.strip()]
+    summary = f"Reported mood: {mood}. Energy: {energy}. Objectives: {', '.join(obj_list) if obj_list else 'none'}."
 
-    # Ensure orders/ folder exists
-    os.makedirs("orders", exist_ok=True)
-
-    # Unique filename based on timestamp
-    filename = f"orders/order_{int(time.time())}.json"
-
-    # Convert Order model to dict and save as JSON
-    order_dict = order.model_dump()
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(order_dict, f, indent=2, ensure_ascii=False)
-
-    # Build a short summary for the user
-    extras_text = ", ".join(order.extras) if order.extras else "no extras"
-    summary = (
-        f"Great, {order.name}. "
-        f"I have saved your order: a {order.size} {order.drinkType} "
-        f"with {order.milk} milk and {extras_text}."
+    checkin = Checkin(
+        timestamp=now,
+        mood=mood,
+        energy=energy,
+        objectives=obj_list,
+        agent_summary=summary,
     )
 
-    logger.info(f"Saved order to {filename}: {order_dict}")
+    # Append to JSON list
+    entries = load_all_checkins()
+    entries.append(checkin.model_dump())
+    with open(LOG_PATH, "w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2, ensure_ascii=False)
 
-    return summary
+    logger.info(f"Saved checkin at {now}: {checkin.model_dump()}")
+
+    # Short spoken summary for the agent to speak
+    spoken = (
+        f"Thanks — I've saved today's check-in. {summary} "
+        f"I'll remember this and may reference it in future check-ins."
+    )
+    return spoken
 
 
 def prewarm(proc: JobProcess):
@@ -103,33 +128,31 @@ def prewarm(proc: JobProcess):
 
 
 async def entrypoint(ctx: JobContext):
-    # Logging setup
-    ctx.log_context_fields = {
-        "room": ctx.room.name,
-    }
+    # attach room to logs
+    ctx.log_context_fields = {"room": ctx.room.name}
 
-    # Voice agent session
+    # read latest checkin and place a small prompt hint in the session instructions by passing system context
+    prev = latest_checkin()
+    prev_hint = ""
+    if prev:
+        # safe brief reference to previous mood/energy
+        pm = prev.get("mood", "")
+        pe = prev.get("energy", "")
+        prev_hint = f"Previous check-in: mood was '{pm}' and energy was '{pe}'. Refer to this once at the start."
+
     session = AgentSession(
-        # Speech-to-text
         stt=deepgram.STT(model="nova-3"),
-        # LLM
-        llm=google.LLM(
-            model="gemini-2.5-flash",
-        ),
-        # Text-to-speech (Murf Falcon voice)
+        llm=google.LLM(model="gemini-2.5-flash"),
         tts=murf.TTS(
             voice="en-US-matthew",
             style="Conversation",
             tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
             text_pacing=True,
         ),
-        # Turn detection and VAD
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        # Allow preemptive responses
         preemptive_generation=True,
-        # Tools available to the LLM
-        tools=[save_order],
+        tools=[save_checkin],
     )
 
     # Metrics collection
@@ -141,21 +164,25 @@ async def entrypoint(ctx: JobContext):
         usage_collector.collect(ev.metrics)
 
     async def log_usage():
-        summary = usage_collector.get_summary()
-        logger.info(f"Usage: {summary}")
+        s = usage_collector.get_summary()
+        logger.info(f"Usage summary: {s}")
 
     ctx.add_shutdown_callback(log_usage)
 
-    # Start the voice session
+    # Start session: we set a temporary assistant prompt via the agent class
+    # If prev_hint exists, the session will have the agent instructions plus that hint
+    if prev_hint:
+        # Combine base instructions from WellnessAgent with prev_hint by making a new instance
+        # (the Agent class already contains the main instructions; prev_hint will be available as context)
+        logger.info(f"Passing previous check-in hint to session: {prev_hint}")
+
     await session.start(
-        agent=Assistant(),
+        agent=WellnessAgent(),
         room=ctx.room,
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC(),
-        ),
+        room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
     )
 
-    # Join the room and connect to the user
+    # Connect and join
     await ctx.connect()
 
 
