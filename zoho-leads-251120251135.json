@@ -1,0 +1,34 @@
+{
+  "company": "Zoho",
+  "overview": "Zoho is a global SaaS company offering CRM, finance, HR, email, helpdesk, and over 55+ cloud products for businesses of all sizes.",
+  "faq": [
+    {
+      "q": "What products does Zoho offer?",
+      "a": "Zoho offers CRM, Books, Mail, Desk, People, Projects, Campaigns, and over 55+ business apps for sales, support, finance, HR, and operations."
+    },
+    {
+      "q": "Do you offer a free plan?",
+      "a": "Yes. Zoho provides free tiers for products like CRM, Mail, Books, and Projects with limited features suitable for individuals and small teams."
+    },
+    {
+      "q": "What are your pricing plans?",
+      "a": "Zoho CRM plans start at ₹800/user per month. Different apps have separate pricing, and Zoho One provides all apps under a single subscription."
+    },
+    {
+      "q": "Is Zoho suitable for small businesses?",
+      "a": "Absolutely. Zoho’s ecosystem is built to support startups, SMBs, and enterprises with scalable tools for every business workflow."
+    },
+    {
+      "q": "Do you provide customer support?",
+      "a": "Zoho offers email, chat, and phone support based on your subscription tier. Enterprise plans come with premium support options."
+    },
+    {
+      "q": "Is my data secure with Zoho?",
+      "a": "Yes. Zoho follows strict security practices, including end-to-end encryption, GDPR compliance, audit logs, and secure global data centers."
+    },
+    {
+      "q": "How fast can we get started?",
+      "a": "Most Zoho products can be deployed instantly. Teams can onboard and go live within a few hours depending on customization needs."
+    }
+  ]
+}
