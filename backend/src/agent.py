@@ -1,13 +1,5 @@
-# backend/src/agent.py
 import logging
-import json
-import os
-import time
-from datetime import datetime, timezone
 from dotenv import load_dotenv
-from pydantic import BaseModel
-from typing import List, Optional
-
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -19,108 +11,89 @@ from livekit.agents import (
     cli,
     metrics,
     tokenize,
-    function_tool,
-    RunContext,
 )
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("agent")
-logger.setLevel(logging.INFO)
 
 load_dotenv(".env.local")
 
-# File where check-ins are stored
-LOG_PATH = "wellness_log.json"
 
+class MurfBrew(Agent):
 
-class WellnessAgent(Agent):
-    def _init_(self) -> None:
-        # System prompt: grounded, supportive, short, and safe
-        super()._init_(
+    def __init__(self):
+        super().__init__(
             instructions="""
-You are a grounded, supportive health & wellness companion. You are empathetic, concise,
-non-judgmental, and explicitly not a clinician. You will ask short daily check-in questions
-and help the user set 1-3 small, realistic intentions for the day.
+You are MurfBrew, a friendly and confident AI barista from a premium café.
+The user speaks to you through voice.  
 
-Behavior:
-- Ask about mood and energy: e.g., "How are you feeling today?" "What's your energy like?"
-- Ask for 1-3 intentions/objectives for the day and any small self-care plan.
-- Offer short, actionable suggestions (e.g., break large tasks into small steps, take a 5-minute walk, short breathing break).
-- Avoid medical or diagnostic wording.
-- Confirm back: repeat the mood summary and the main objectives and ask "Does this sound right?"
-- When you have mood, energy, and objectives, call the tool save_checkin(mood, energy, objectives) exactly once.
-- If historical data is available, briefly reference the most recent previous check-in early in the conversation (e.g., "Last time you mentioned low energy; how is today compared to that?").
-            """,
+Your job:
+- Greet the customer naturally.
+- Take their coffee order step by step.
+- Ask one question at a time in this order: drink → size → hot/iced → milk → extras → confirmation.
+- Remember what they answered.
+- Once the order is fully known, repeat it naturally and ask if you'd like to confirm.
+- If confirmed, close the interaction politely and confidently.
+
+Tone rules:
+- Sound like a real barista, not an AI assistant.
+- Keep responses short, casual and natural.
+- No emojis. No robotic phrases.    
+""",
         )
 
+        # state memory for the order
+        self.state = {
+            "drink": None,
+            "size": None,
+            "temperature": None,
+            "milk": None,
+            "extras": [],
+            "confirmed": False,
+        }
 
-class Checkin(BaseModel):
-    timestamp: str
-    mood: str
-    energy: str
-    objectives: List[str]
-    agent_summary: Optional[str] = None
+    async def on_user_message(self, ctx: AgentSession, message: str):
+        msg = message.lower().strip()
 
+        # Step 1: drink
+        if self.state["drink"] is None:
+            self.state["drink"] = msg
+            return await ctx.send_message("Nice choice. What size would you like? Small, medium, or large?")
 
-def _ensure_log():
-    # Create file if missing with empty list
-    if not os.path.exists(LOG_PATH):
-        with open(LOG_PATH, "w", encoding="utf-8") as f:
-            json.dump([], f)
+        # Step 2: size
+        if self.state["size"] is None:
+            self.state["size"] = msg
+            return await ctx.send_message("Got it. Would you like it hot or iced?")
 
+        # Step 3: temperature
+        if self.state["temperature"] is None:
+            self.state["temperature"] = msg
+            return await ctx.send_message("What milk do you want? Whole, skim, oat or almond?")
 
-def load_all_checkins() -> List[dict]:
-    _ensure_log()
-    with open(LOG_PATH, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except Exception:
-            return []
+        # Step 4: milk
+        if self.state["milk"] is None:
+            self.state["milk"] = msg
+            return await ctx.send_message("Any extras? Sugar, whipped cream, caramel, chocolate or extra espresso shot?")
 
+        # Step 5: extras (collect once, then confirm)
+        if not self.state["confirmed"]:
+            if msg not in ["no", "none", "that's all", "done"]:
+                self.state["extras"].append(msg)
 
-def latest_checkin() -> Optional[dict]:
-    entries = load_all_checkins()
-    if not entries:
-        return None
-    # assume append order, return last
-    return entries[-1]
+            self.state["confirmed"] = True
 
+            summary = f"Alright, so you ordered a {self.state['size']} {self.state['temperature']} {self.state['drink']} with {self.state['milk']} milk"
+            if self.state["extras"]:
+                summary += f" and extras: {', '.join(self.state['extras'])}."
 
-@function_tool
-async def save_checkin(ctx: RunContext, mood: str, energy: str, objectives: List[str]) -> str:
-    """
-    Save a wellness check-in to wellness_log.json and return a short agent summary.
-    Called by the LLM when the check-in is complete.
-    """
-    _ensure_log()
-    now = datetime.now(timezone.utc).isoformat()
-    # Clean objectives and create summary
-    obj_list = [o.strip() for o in objectives if o and o.strip()]
-    summary = f"Reported mood: {mood}. Energy: {energy}. Objectives: {', '.join(obj_list) if obj_list else 'none'}."
+            return await ctx.send_message(summary + " Should I confirm the order?")
 
-    checkin = Checkin(
-        timestamp=now,
-        mood=mood,
-        energy=energy,
-        objectives=obj_list,
-        agent_summary=summary,
-    )
+        # Final confirmation
+        if "yes" in msg or "confirm" in msg:
+            return await ctx.send_message("Perfect. Your drink is being prepared. Thanks for choosing MurfBrew.")
 
-    # Append to JSON list
-    entries = load_all_checkins()
-    entries.append(checkin.model_dump())
-    with open(LOG_PATH, "w", encoding="utf-8") as f:
-        json.dump(entries, f, indent=2, ensure_ascii=False)
-
-    logger.info(f"Saved checkin at {now}: {checkin.model_dump()}")
-
-    # Short spoken summary for the agent to speak
-    spoken = (
-        f"Thanks — I've saved today's check-in. {summary} "
-        f"I'll remember this and may reference it in future check-ins."
-    )
-    return spoken
+        return await ctx.send_message("No problem. Would you like to change something or restart?")
 
 
 def prewarm(proc: JobProcess):
@@ -128,17 +101,8 @@ def prewarm(proc: JobProcess):
 
 
 async def entrypoint(ctx: JobContext):
-    # attach room to logs
-    ctx.log_context_fields = {"room": ctx.room.name}
 
-    # read latest checkin and place a small prompt hint in the session instructions by passing system context
-    prev = latest_checkin()
-    prev_hint = ""
-    if prev:
-        # safe brief reference to previous mood/energy
-        pm = prev.get("mood", "")
-        pe = prev.get("energy", "")
-        prev_hint = f"Previous check-in: mood was '{pm}' and energy was '{pe}'. Refer to this once at the start."
+    ctx.log_context_fields = { "room": ctx.room.name }
 
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
@@ -147,15 +111,13 @@ async def entrypoint(ctx: JobContext):
             voice="en-US-matthew",
             style="Conversation",
             tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
-            text_pacing=True,
+            text_pacing=True
         ),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
         preemptive_generation=True,
-        tools=[save_checkin],
     )
 
-    # Metrics collection
     usage_collector = metrics.UsageCollector()
 
     @session.on("metrics_collected")
@@ -164,27 +126,21 @@ async def entrypoint(ctx: JobContext):
         usage_collector.collect(ev.metrics)
 
     async def log_usage():
-        s = usage_collector.get_summary()
-        logger.info(f"Usage summary: {s}")
+        summary = usage_collector.get_summary()
+        logger.info(f"Usage: {summary}")
 
     ctx.add_shutdown_callback(log_usage)
 
-    # Start session: we set a temporary assistant prompt via the agent class
-    # If prev_hint exists, the session will have the agent instructions plus that hint
-    if prev_hint:
-        # Combine base instructions from WellnessAgent with prev_hint by making a new instance
-        # (the Agent class already contains the main instructions; prev_hint will be available as context)
-        logger.info(f"Passing previous check-in hint to session: {prev_hint}")
-
     await session.start(
-        agent=WellnessAgent(),
+        agent=MurfBrew(),
         room=ctx.room,
-        room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
+        room_input_options=RoomInputOptions(
+            noise_cancellation=noise_cancellation.BVC(),
+        ),
     )
 
-    # Connect and join
     await ctx.connect()
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
