@@ -1,0 +1,26 @@
+[
+  {
+    "id": "ORD-C152776D80",
+    "timestamp": "2025-11-28T04:51:11.666083Z",
+    "customer": {
+      "name": "Simon Lal",
+      "address": "Gupta Sherwood, Hathital, Jalalpur",
+      "note": "If there is anything free, I would like to donate it to the next person."
+    },
+    "items": [
+      {
+        "id": "milk-1l",
+        "name": "Milk 1L",
+        "unit_price": 60,
+        "qty": 1,
+        "unit": "1L",
+        "tags": [
+          "dairy"
+        ]
+      }
+    ],
+    "total": 60.0,
+    "status": "received",
+    "type": "grocery"
+  }
+]
